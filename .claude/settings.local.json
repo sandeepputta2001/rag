@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /home/keerthi/sandeep/rag_project/venv/lib/python*/site-packages/)",
+      "Bash(/home/keerthi/sandeep/rag_project/venv/bin/python -m pip list)",
+      "Bash(python3 -m pip list)",
+      "Bash(pip3 list:*)",
+      "Bash(pip3 install:*)",
+      "Bash(python3 test_chunking.py)",
+      "Bash(python3 app.py)",
+      "Bash(curl -s http://localhost:5252/api/status)",
+      "Bash(python3 -c \"import flask; print\\('flask ok'\\)\")",
+      "Bash(python3 -c \"import chromadb; print\\('chromadb ok'\\)\")",
+      "Bash(/usr/bin/python3 -c \"import flask; print\\('flask ok'\\)\")",
+      "Bash(/usr/bin/python3 -c \"import chromadb; print\\('chromadb ok'\\)\")",
+      "Bash(/usr/bin/python3 app.py)",
+      "Bash(echo \"PID: $!\")",
+      "Read(//tmp/**)",
+      "Bash(kill 296700 297945)",
+      "Bash(curl -s -X POST http://localhost:5252/api/chat -H 'Content-Type: application/json' -d '{\"message\": \"What is the pet policy at TechCorp?\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X POST http://localhost:5252/api/chat -H 'Content-Type: application/json' -d '{\"message\": \"What are the employee benefits?\"}')",
+      "Bash(pkill -f \"python3 app.py\")",
+      "Bash(curl -s -X POST http://localhost:5252/api/chat -H 'Content-Type: application/json' -d '{\"message\": \"__TRACKED_VAR__\"}')",
+      "Bash(pip3 show:*)",
+      "Bash(/usr/bin/python3 -c \"import chromadb; help\\(chromadb.config.Settings\\)\")",
+      "Bash(/usr/bin/python3 -c ':*)"
+    ]
+  }
+}
