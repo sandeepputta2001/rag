@@ -62,6 +62,7 @@ def chat():
             'response': response['answer'],
             'sources': response['sources'],
             'confidence': response['confidence'],
+            'provider': response.get('provider', 'fallback'),
             'timestamp': datetime.now().isoformat()
         })
         
@@ -119,7 +120,8 @@ def status():
             'status': 'operational',
             'documents': stats['total_documents'],
             'chunks': stats['total_chunks'],
-            'last_updated': stats['last_updated']
+            'last_updated': stats['last_updated'],
+            'provider': chat_engine.provider,
         })
     except Exception as e:
         return jsonify({

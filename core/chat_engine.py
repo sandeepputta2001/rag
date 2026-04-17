@@ -1,27 +1,78 @@
 """
 Chat Engine - generates answers using retrieved context (RAG)
+
+Provider priority (first available wins):
+  1. Gemini  — set GEMINI_API_KEY
+  2. Anthropic (Claude) — set ANTHROPIC_API_KEY
+  3. Keyword extraction fallback (no API key required)
 """
 
 import os
+
+SYSTEM_PROMPT = """You are TechCorp's AI assistant. Use the provided context to answer the question accurately and concisely.
+Answer based only on the provided context. If the context doesn't contain enough information, say so."""
+
+
+def _build_prompt(question: str, context: str) -> str:
+    return f"""{SYSTEM_PROMPT}
+
+Context from TechCorp documents:
+{context}
+
+Question: {question}"""
 
 
 class ChatEngine:
     def __init__(self, vector_engine):
         self.vector_engine = vector_engine
+        self.provider = "fallback"  # "gemini" | "anthropic" | "fallback"
         self._setup_llm()
 
-    def _setup_llm(self):
-        self.use_claude = False
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if api_key:
-            try:
-                import anthropic
-                self.client = anthropic.Anthropic(api_key=api_key)
-                self.use_claude = True
-            except ImportError:
-                pass
+    # ------------------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------------------
 
-    def get_response(self, question):
+    def _setup_llm(self):
+        """Try Gemini first, then Anthropic, then fall back to keyword extraction."""
+        if self._try_gemini():
+            return
+        if self._try_anthropic():
+            return
+        print("[ChatEngine] No LLM API key found — using keyword-extraction fallback")
+
+    def _try_gemini(self) -> bool:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return False
+        try:
+            from google import genai
+            self.gemini_client = genai.Client(api_key=api_key)
+            self.provider = "gemini"
+            print("[ChatEngine] Provider: Gemini (gemini-2.0-flash)")
+            return True
+        except ImportError:
+            print("[ChatEngine] google-genai not installed — skipping Gemini")
+            return False
+
+    def _try_anthropic(self) -> bool:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return False
+        try:
+            import anthropic
+            self.anthropic_client = anthropic.Anthropic(api_key=api_key)
+            self.provider = "anthropic"
+            print("[ChatEngine] Provider: Anthropic (claude-haiku-4-5-20251001)")
+            return True
+        except ImportError:
+            print("[ChatEngine] anthropic not installed — skipping Anthropic")
+            return False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_response(self, question: str) -> dict:
         results = self.vector_engine.search(question, n_results=3)
 
         docs = results["documents"][0]
@@ -36,40 +87,47 @@ class ChatEngine:
             sources.append({
                 "category": meta.get("category", "General"),
                 "file": meta.get("file", "document"),
-                "relevance": confidence
+                "relevance": confidence,
             })
 
-        if self.use_claude:
-            answer = self._generate_with_claude(question, context)
+        if self.provider == "gemini":
+            answer = self._generate_with_gemini(question, context)
+        elif self.provider == "anthropic":
+            answer = self._generate_with_anthropic(question, context)
         else:
             answer = self._generate_from_context(question, context)
 
-        overall_confidence = round(sum(s["relevance"] for s in sources) / len(sources), 1) if sources else 0.0
+        overall_confidence = (
+            round(sum(s["relevance"] for s in sources) / len(sources), 1) if sources else 0.0
+        )
 
         return {
             "answer": answer,
             "sources": sources,
-            "confidence": overall_confidence
+            "confidence": overall_confidence,
+            "provider": self.provider,
         }
 
-    def _generate_with_claude(self, question, context):
-        prompt = f"""You are TechCorp's AI assistant. Use the provided context to answer the question accurately and concisely.
+    # ------------------------------------------------------------------
+    # Generators
+    # ------------------------------------------------------------------
 
-Context from TechCorp documents:
-{context}
+    def _generate_with_gemini(self, question: str, context: str) -> str:
+        response = self.gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=_build_prompt(question, context),
+        )
+        return response.text
 
-Question: {question}
-
-Answer based only on the provided context. If the context doesn't contain enough information, say so."""
-
-        message = self.client.messages.create(
+    def _generate_with_anthropic(self, question: str, context: str) -> str:
+        message = self.anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": _build_prompt(question, context)}],
         )
         return message.content[0].text
 
-    def _generate_from_context(self, question, context):
+    def _generate_from_context(self, question: str, context: str) -> str:
         if not context.strip():
             return "I don't have enough information in the TechCorp knowledge base to answer that question."
 
@@ -88,5 +146,4 @@ Answer based only on the provided context. If the context doesn't contain enough
         if relevant:
             return "Based on TechCorp documents: " + " ".join(relevant[:4])
 
-        first_300 = context[:300].strip()
-        return f"Based on TechCorp documents: {first_300}..."
+        return f"Based on TechCorp documents: {context[:300].strip()}..."

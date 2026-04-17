@@ -174,7 +174,7 @@
         <div class="status-dot"></div>
         <div>
             <h1>TechCorp AI Assistant</h1>
-            <div class="subtitle">Powered by RAG &mdash; Ask about HR, benefits, products & more</div>
+            <div class="subtitle">Powered by RAG &mdash; <span id="providerLabel">loading...</span></div>
         </div>
     </header>
 
@@ -201,6 +201,23 @@
     </div>
 
     <script>
+        const PROVIDER_LABELS = {
+            gemini: 'Gemini 2.0 Flash',
+            anthropic: 'Claude Haiku',
+            fallback: 'Keyword Extraction'
+        };
+
+        // Fetch provider info on load
+        fetch('/api/status')
+            .then(r => r.json())
+            .then(d => {
+                const label = PROVIDER_LABELS[d.provider] || d.provider;
+                document.getElementById('providerLabel').textContent = label + ' · Ask about HR, benefits, products & more';
+            })
+            .catch(() => {
+                document.getElementById('providerLabel').textContent = 'Ask about HR, benefits, products & more';
+            });
+
         function autoResize(el) {
             el.style.height = 'auto';
             el.style.height = Math.min(el.scrollHeight, 120) + 'px';
@@ -218,7 +235,7 @@
             sendMessage();
         }
 
-        function appendMessage(role, content, sources, confidence) {
+        function appendMessage(role, content, sources, confidence, provider) {
             const welcome = document.getElementById('welcome');
             if (welcome) welcome.remove();
 
@@ -242,7 +259,8 @@
 
                 const conf = document.createElement('div');
                 conf.className = 'confidence';
-                conf.textContent = `Confidence: ${confidence}%`;
+                const providerText = provider ? ` · ${PROVIDER_LABELS[provider] || provider}` : '';
+                conf.textContent = `Confidence: ${confidence}%${providerText}`;
 
                 bubble.appendChild(srcDiv);
                 bubble.appendChild(conf);
@@ -301,7 +319,7 @@
                 if (data.error) {
                     appendMessage('assistant', 'Error: ' + data.error);
                 } else {
-                    appendMessage('assistant', data.response, data.sources, data.confidence);
+                    appendMessage('assistant', data.response, data.sources, data.confidence, data.provider);
                 }
             } catch (err) {
                 document.getElementById('typing')?.remove();

@@ -88,16 +88,22 @@ rag_project/
 ### 1. Install dependencies
 
 ```bash
-pip3 install flask chromadb sentence-transformers anthropic --break-system-packages
+pip3 install flask chromadb sentence-transformers anthropic google-genai --break-system-packages
 ```
 
 > If you use a virtual environment, activate it first and omit `--break-system-packages`.
 
-### 2. (Optional) Enable Claude AI for better answers
+### 2. (Optional) Enable an LLM for better answers
 
-Without an API key the app uses keyword extraction from retrieved chunks. With a key it calls Claude Haiku for fluent, context-aware answers.
+Without an API key the app uses keyword extraction from retrieved chunks. Set one of the keys below to get fluent, context-aware answers.
+
+Provider priority: **Gemini → Anthropic → keyword fallback**
 
 ```bash
+# Option A — Gemini 1.5 Flash (checked first)
+export GEMINI_API_KEY="AIza..."
+
+# Option B — Claude Haiku (used if GEMINI_API_KEY is not set)
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
@@ -126,7 +132,7 @@ First run detected. Processing TechCorp documents...
     tech_stack.md: 13 chunks
   Processing category: finance
     expense_policy.md: 9 chunks
-  Processing category: hr
+  P2rocessing category: hr
     benefits.md: 12 chunks
     ...
   Total: 11 documents, 101 chunks ingested
@@ -221,6 +227,7 @@ Ask a question. Returns a complete answer in one response.
     { "category": "hr", "file": "pet_policy.md", "relevance": 74.8 }
   ],
   "confidence": 74.8,
+  "provider": "gemini",
   "timestamp": "2026-04-14T14:51:23.768091"
 }
 ```
@@ -258,7 +265,8 @@ Returns the health and size of the vector store.
   "status": "operational",
   "documents": 1,
   "chunks": 101,
-  "last_updated": "N/A"
+  "last_updated": "N/A",
+  "provider": "gemini"
 }
 ```
 
@@ -362,6 +370,8 @@ User types a question
          ▼
 [3] Build context   ──►  Join chunks into a single string
          │
+         ├─── GEMINI_API_KEY set?    ──YES──► Gemini 1.5 Flash generates answer
+         │
          ├─── ANTHROPIC_API_KEY set? ──YES──► Claude Haiku generates answer
          │
          └─────────────────────────── NO ───► Keyword extraction from context
@@ -436,22 +446,30 @@ Implements the Retrieve → Augment → Generate pipeline.
 
 ```
 ChatEngine.__init__(vector_engine)
-  └─ checks ANTHROPIC_API_KEY env var
+  └─ checks GEMINI_API_KEY env var first
+  └─ if set: initialises google.generativeai client (gemini-1.5-flash)
+  └─ else checks ANTHROPIC_API_KEY env var
   └─ if set: initialises anthropic.Anthropic client
+  └─ else: falls back to keyword extraction
 
-get_response(question) → {answer, sources, confidence}
+get_response(question) → {answer, sources, confidence, provider}
   │
   ├─ vector_engine.search(question, n_results=3)
   │
   ├─ per-source confidence = (1 − cosine_distance) × 100
   │
-  ├─ ANTHROPIC_API_KEY set?
-  │      YES → _generate_with_claude(question, context)
+  ├─ provider == "gemini"?
+  │      YES → _generate_with_gemini(question, context)
+  │               model: gemini-1.5-flash
+  │
+  ├─ provider == "anthropic"?
+  │      YES → _generate_with_anthropic(question, context)
   │               model: claude-haiku-4-5-20251001
   │               max_tokens: 512
-  │               system prompt: "Answer only from provided context"
-  │      NO  → _generate_from_context(question, context)
-  │               keyword pattern-match → extract relevant lines
+  │
+  └─ provider == "fallback"
+             → _generate_from_context(question, context)
+                  keyword pattern-match → extract relevant lines
   │
   └─ overall_confidence = mean of per-source confidence scores
 ```
@@ -460,6 +478,7 @@ get_response(question) → {answer, sources, confidence}
 
 | Mode | Trigger | Quality |
 | --- | --- | --- |
+| Gemini 2.0 Flash | `GEMINI_API_KEY` is set (checked first) | Fluent, context-aware answers |
 | Claude Haiku | `ANTHROPIC_API_KEY` is set | Fluent, context-aware answers |
 | Keyword fallback | No API key | Extracts matching lines from retrieved chunks |
 
