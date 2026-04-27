@@ -1,208 +1,234 @@
-# TechCorp AI Assistant
+# TechCorp AI Assistant — RAG Part I
 
-A Retrieval-Augmented Generation (RAG) chat application that lets employees ask natural language questions about TechCorp's internal policies, products, and engineering practices. The app finds the most relevant documents from a local knowledge base and generates grounded answers from them.
+A production-grade **Retrieval-Augmented Generation** (RAG) chat application implementing all concepts from Part I (Sections 1–5) of the RAG Comprehensive Guide. Employees ask natural-language questions; the system retrieves grounded evidence from a local knowledge base and generates accurate, cited answers.
 
 ---
 
 ## Table of Contents
 
+- [Architecture Overview](#architecture-overview)
+- [Module Reference](#module-reference)
 - [Project Structure](#project-structure)
 - [Knowledge Base](#knowledge-base)
-- [How to Run](#how-to-run)
-- [How to Use](#how-to-use)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
 - [API Reference](#api-reference)
+- [RAG Architectures](#rag-architectures)
+- [Retrieval Strategies](#retrieval-strategies)
+- [Evaluation](#evaluation)
 - [Telemetry](#telemetry)
-- [High-Level Design](#high-level-design)
 - [Low-Level Design](#low-level-design)
+
+---
+
+## Architecture Overview
+
+```
+Browser / cURL
+      │  HTTP
+      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Flask  app.py  — 8 REST endpoints                              │
+│  /api/chat  /api/chat/stream  /api/ingest  /api/evaluate        │
+│  /api/status  /api/architectures  /api/strategies               │
+│  /api/conversation/reset                                        │
+└──────┬────────────────┬───────────────────┬─────────────────────┘
+       │                │                   │
+       ▼                ▼                   ▼
+┌────────────┐  ┌──────────────┐  ┌────────────────────┐
+│ ChatEngine │  │  Retriever   │  │ DocumentProcessor  │
+│            │  │              │  │                    │
+│ Dispatches │  │ top_k        │  │ PDF / HTML / MD    │
+│ to arch:   │  │ hybrid BM25+ │  │ code chunking      │
+│ • simple   │  │ multi_query  │  │ fixed / recursive  │
+│ • multihop │  │ hyde         │  │ rich metadata      │
+│ • conv     │  │ filtered     │  │ content-hash IDs   │
+│ • agentic  │  └──────┬───────┘  └─────────┬──────────┘
+│ • crag     │         │                    │
+│ • graph    │         ▼                    ▼
+└────────────┘  ┌──────────────────────────────────────┐
+                │          VectorEngine                │
+                │                                      │
+                │  EmbeddingBackend                    │
+                │    • SentenceTransformers (default)  │
+                │    • OpenAI Matryoshka               │
+                │                                      │
+                │  Storage                             │
+                │    • ChromaDB (persistent, cosine)   │
+                │    • FAISS (optional, in-memory)     │
+                │                                      │
+                │  BM25Index (rank_bm25)               │
+                └──────────────────────────────────────┘
+```
+
+### Request Data Flow
+
+```
+User question
+     │
+     ▼
+[1] Retrieve  ─── strategy ───►  chunks + similarity scores
+     │             top_k / hybrid / multi_query / hyde / filtered
+     ▼
+[2] Architecture ─────────────►  SimpleRAG  /  MultiHop  /  Conv
+     │                            Agentic   /  CRAG       /  Graph
+     ▼
+[3] Build prompt  ────────────►  RAG / CoT / few-shot / ReAct
+     │
+     ▼
+[4] Generate  ────── provider ►  Gemini → Anthropic → OpenRouter → fallback
+     │
+     ▼
+[5] Return  { answer, sources, confidence, architecture, strategy }
+```
+
+---
+
+## Module Reference
+
+| Module | Section | Responsibility |
+|---|---|---|
+| `core/foundations.py` | §1 | Tokenisation, similarity metrics, context budget, prompt templates, chunk IDs |
+| `core/document_processor.py` | §2 | PDF/HTML/Markdown/code parsing, fixed + recursive chunking, metadata, traceability |
+| `core/vector_engine.py` | §3 | Embedding backends, ChromaDB, FAISS index, batch encoding, score filtering |
+| `core/retrieval.py` | §4 | BM25, RRF fusion, Retriever with 5 strategies, ACL/date/doctype filters |
+| `core/rag_architectures.py` | §5 | SimpleRAG, MultiHop, Conversational, Agentic (ReAct), CRAG, Graph RAG |
+| `core/evaluation.py` | §5 | Golden dataset, RAGEvaluator, BLEU-1, faithfulness, human eval checklist |
+| `core/chat_engine.py` | §5 | LLM provider wiring, architecture dispatch, BM25 lifecycle |
+| `core/telemetry.py` | — | OpenTelemetry TracerProvider (console or OTLP) |
 
 ---
 
 ## Project Structure
 
 ```
-rag_project/
-│
-├── app.py                          # Flask server — routes and startup
+rag/
+├── app.py                      # Flask server — 8 REST endpoints
+├── Makefile                    # Common dev tasks
 │
 ├── core/
-│   ├── telemetry.py                # OpenTelemetry setup (console or OTLP)
-│   ├── vector_engine.py            # ChromaDB + sentence-transformers
-│   ├── chat_engine.py              # RAG pipeline — retrieve → generate
-│   └── document_processor.py      # Reads and chunks techcorp-docs/
+│   ├── foundations.py          # §1  Tokenisation, similarity, prompts, chunk IDs
+│   ├── document_processor.py   # §2  Multi-format parsing + chunking
+│   ├── vector_engine.py        # §3  Embeddings, ChromaDB, FAISS
+│   ├── retrieval.py            # §4  BM25, hybrid RRF, multi-query, HyDE, filters
+│   ├── rag_architectures.py    # §5  Six RAG architecture classes
+│   ├── evaluation.py           # §5  Golden dataset + RAGEvaluator
+│   ├── chat_engine.py          # §5  LLM adapters + architecture dispatch
+│   └── telemetry.py            # OTEL TracerProvider setup
 │
 ├── templates/
-│   └── chat.html                   # Browser chat UI (vanilla JS, no framework)
+│   └── chat.html               # Browser chat UI (vanilla JS, no framework)
 │
-├── techcorp-docs/                  # Source documents (Markdown)
-│   ├── engineering/
-│   │   ├── on_call_runbook.md
-│   │   └── tech_stack.md
-│   ├── finance/
-│   │   └── expense_policy.md
-│   ├── hr/
-│   │   ├── benefits.md
-│   │   ├── code_of_conduct.md
-│   │   ├── pet_policy.md
-│   │   └── remote_work.md
-│   ├── legal/
-│   │   └── data_privacy_policy.md
-│   └── products/
-│       ├── cloudsync_pro.md
-│       ├── databridge.md
-│       └── techassist_ai.md
+├── techcorp-docs/              # Source knowledge base (Markdown)
+│   ├── engineering/            #   on_call_runbook.md, tech_stack.md
+│   ├── finance/                #   expense_policy.md
+│   ├── hr/                     #   benefits.md, code_of_conduct.md, pet_policy.md, remote_work.md
+│   ├── legal/                  #   data_privacy_policy.md
+│   └── products/               #   cloudsync_pro.md, databridge.md, techassist_ai.md
 │
-├── chroma_db/                      # Persisted vector store (auto-created on first run)
+├── chroma_db/                  # Persisted vector store (auto-created on first run)
+├── eval_logs/                  # Evaluation run reports (JSONL)
 │
-├── test_chunking.py                # Tests the text-chunking logic
-├── test_embeddings.py              # Tests sentence-transformer embeddings
-├── test_search.py                  # Runs semantic search queries against ChromaDB
-├── test_rag_pipeline.py            # End-to-end RAG pipeline smoke test
-├── init_vectordb.py                # Creates / resets the ChromaDB collection
-└── ingest_documents.py             # Re-ingests documents into ChromaDB
+├── test_chunking.py            # Chunking unit tests
+├── test_embeddings.py          # Embedding similarity tests
+├── test_search.py              # Semantic search smoke test
+├── test_rag_pipeline.py        # End-to-end pipeline test
+├── init_vectordb.py            # Create / reset ChromaDB collection
+└── ingest_documents.py         # Manual re-ingest script
 ```
 
 ---
 
 ## Knowledge Base
 
-11 Markdown documents across 5 departments are pre-loaded into the vector store on first run.
+11 Markdown documents across 5 categories, auto-ingested as **101 chunks** on first run.
 
-| Category | File | Topics Covered |
+| Category | File | Topics |
 |---|---|---|
+| `hr` | `benefits.md` | Medical/dental/vision, 401k, PTO, parental leave, learning budget |
+| `hr` | `code_of_conduct.md` | Integrity, anti-harassment, conflict-of-interest, reporting |
 | `hr` | `pet_policy.md` | Furry Fridays, eligible animals, designated areas, office mascot |
 | `hr` | `remote_work.md` | Hybrid schedule, core hours, VPN, equipment stipends |
-| `hr` | `benefits.md` | Medical/dental/vision, 401k, PTO, parental leave, learning budget |
-| `hr` | `code_of_conduct.md` | Integrity, anti-harassment, conflict of interest, reporting |
-| `engineering` | `tech_stack.md` | Languages, databases, Kubernetes, CI/CD, code review standards |
-| `engineering` | `on_call_runbook.md` | Severity levels, escalation paths, incident playbooks, PIR process |
-| `finance` | `expense_policy.md` | Travel limits, meal allowances, submission process, corporate cards |
-| `legal` | `data_privacy_policy.md` | GDPR/CCPA, data retention periods, your rights, breach notification |
+| `engineering` | `on_call_runbook.md` | Severity levels, escalation paths, incident playbooks, PIR |
+| `engineering` | `tech_stack.md` | Languages, databases, Kubernetes, CI/CD, code review |
+| `finance` | `expense_policy.md` | Travel limits, meal allowances, submission process |
+| `legal` | `data_privacy_policy.md` | GDPR/CCPA, data retention, breach notification |
 | `products` | `cloudsync_pro.md` | Features, pricing, SLA, system requirements |
-| `products` | `techassist_ai.md` | AI support platform, integrations, pricing, onboarding |
 | `products` | `databridge.md` | ETL connectors, pipeline modes, pricing |
+| `products` | `techassist_ai.md` | AI support platform, integrations, onboarding |
 
 ---
 
-## How to Run
-
-### 1. Install dependencies
+## Quick Start
 
 ```bash
-pip3 install flask chromadb sentence-transformers anthropic google-genai --break-system-packages
-```
+# 1. Clone and enter the project
+cd /path/to/rag
 
-> If you use a virtual environment, activate it first and omit `--break-system-packages`.
+# 2. Install dependencies (or use the Makefile)
+make install
 
-### 2. (Optional) Enable an LLM for better answers
-
-Without an API key the app uses keyword extraction from retrieved chunks. Set one of the keys below to get fluent, context-aware answers.
-
-Provider priority: **Gemini → Anthropic → keyword fallback**
-
-```bash
-# Option A — Gemini 1.5 Flash (checked first)
-export GEMINI_API_KEY="AIza..."
-
-# Option B — Claude Haiku (used if GEMINI_API_KEY is not set)
+# 3. (Optional) set an LLM API key for fluent answers
+export GEMINI_API_KEY="AIza..."       # highest priority
+# OR
 export ANTHROPIC_API_KEY="sk-ant-..."
-```
+# OR
+export OPENROUTER_API_KEY="sk-or-..."
 
-### 3. Start the application
+# 4. Run the application
+make run
+# → http://localhost:5252
 
-```bash
-/usr/bin/python3 app.py
-```
-
-**What happens on first run:**
-
-```
-============================================================
-Starting TechCorp AI Assistant
-============================================================
-
-[INIT] Loading RAG components...
-[INIT] Telemetry ready (OpenTelemetry → stdout)
-[INIT] Vector engine ready
-[INIT] Chat engine ready
-[INIT] Document processor ready
-First run detected. Processing TechCorp documents...
-
-  Processing category: engineering
-    on_call_runbook.md: 11 chunks
-    tech_stack.md: 13 chunks
-  Processing category: finance
-    expense_policy.md: 9 chunks
-  P2rocessing category: hr
-    benefits.md: 12 chunks
-    ...
-  Total: 11 documents, 101 chunks ingested
-
- * Running on http://0.0.0.0:5252
-```
-
-Documents are embedded and saved to `chroma_db/`. Subsequent restarts skip ingestion and load instantly.
-
-### 4. Open the chat UI
-
-```
-http://localhost:5252
+# 5. Run evaluation on the golden dataset
+make evaluate
 ```
 
 ---
 
-### Running individual scripts
+## Configuration
 
-| Script | Command | Purpose |
+### LLM Provider Priority
+
+Provider is selected automatically: **Gemini → Anthropic → OpenRouter → keyword fallback**
+
+| Provider | Env Var | Model |
 |---|---|---|
-| Chunking test | `python3 test_chunking.py` | Verify the 500-char / 100-overlap chunking logic |
-| Embedding test | `python3 test_embeddings.py` | Check sentence-transformer similarity scores |
-| Init vector DB | `python3 init_vectordb.py` | Create or reset the ChromaDB collection |
-| Re-ingest docs | `python3 ingest_documents.py` | Load documents into ChromaDB from `techcorp-docs/` |
-| Search test | `python3 test_search.py` | Run 3 semantic search queries and print results |
-| Pipeline test | `python3 test_rag_pipeline.py` | End-to-end RAG smoke test with a sample question |
+| Gemini (default) | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
+| OpenRouter | `OPENROUTER_API_KEY` + `OPENROUTER_MODEL` | `openai/gpt-4o-mini` (default) |
+| Fallback | _(none required)_ | Keyword extraction from context |
 
-### Reset and re-ingest from scratch
+### Architecture & Retrieval Defaults
 
-```bash
-rm -rf chroma_db/
-/usr/bin/python3 app.py     # first-run detection triggers ingestion automatically
-```
+Override at request time via JSON body, or change defaults in `app.py`:
 
----
+| Setting | Default | Options |
+|---|---|---|
+| Architecture | `simple` | `simple`, `multihop`, `conversational`, `agentic`, `crag`, `graph` |
+| Retrieval strategy | `top_k` | `top_k`, `hybrid`, `multi_query`, `hyde`, `filtered` |
+| n_results | `5` | any int |
+| score_threshold | `0.70` | 0.0 – 1.0 |
 
-## How to Use
+### Embedding Backend
 
-### Chat UI
+Change in `app.py` → `VectorEngine(embedding_backend=..., embedding_model=...)`:
 
-Open `http://localhost:5252`. Type a question and press **Enter** or click **Send**.
+| Backend | Model alias | Dimension | Notes |
+|---|---|---|---|
+| `sentence_transformers` | `default` / `minilm` | 384 | Ships with the project, works offline |
+| `sentence_transformers` | `bge` | 1024 | Higher quality, requires ~1 GB download |
+| `openai` | `text-embedding-3-small` | 1536 | Needs `OPENAI_API_KEY`; supports Matryoshka |
+| `openai` | `text-embedding-3-large` | 3072 | Best quality; Matryoshka via `dimensions=` |
 
-Suggestion chips are shown on the welcome screen for quick starts:
+### Chunking Strategy
 
-- _What is the pet policy?_
-- _How many remote work days are allowed?_
-- _What benefits does TechCorp offer?_
-- _Tell me about CloudSync Pro_
-- _What is the tech stack used?_
+Change in `app.py` → `DocumentProcessor(chunk_strategy=...)`:
 
-Each response shows:
-
-| Field | Meaning |
-|---|---|
-| **Answer** | Text grounded in retrieved document chunks |
-| **Sources** | Category and filename of each chunk used |
-| **Confidence** | Cosine similarity score (0–100) of the best-matching chunk |
-
-### cURL examples
-
-```bash
-# Ask a question
-curl -X POST http://localhost:5252/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is the hotel expense limit when travelling?"}'
-
-# Check system status
-curl http://localhost:5252/api/status
-```
+| Strategy | Config key | Description |
+|---|---|---|
+| Recursive (default) | `recursive` | Tries `\n\n → \n → ". " → " " → ""` before hard split |
+| Fixed character | `fixed_char` | Equal-size windows with `size=1000, overlap=100` |
+| Fixed token | `fixed_token` | Token-aware via tiktoken; falls back to char/4 offline |
 
 ---
 
@@ -210,25 +236,31 @@ curl http://localhost:5252/api/status
 
 ### `POST /api/chat`
 
-Ask a question. Returns a complete answer in one response.
+Ask a question. Accepts an optional architecture and retrieval strategy.
 
-#### Request
-
-```json
-{ "message": "What is the pet policy at TechCorp?" }
-```
-
-#### Response
-
+**Request**
 ```json
 {
-  "response": "Based on TechCorp documents: Employees may bring pets to the office on Fridays (Furry Fridays). Dogs must be well-behaved and up-to-date on vaccinations.",
+  "message": "What is the hotel expense limit?",
+  "architecture": "simple",
+  "retrieval_strategy": "hybrid",
+  "access_level": "public"
+}
+```
+
+**Response**
+```json
+{
+  "response": "The hotel expense limit for domestic travel is $250/night...",
   "sources": [
-    { "category": "hr", "file": "pet_policy.md", "relevance": 74.8 }
+    { "category": "finance", "file": "expense_policy.md", "relevance": 84.2 }
   ],
-  "confidence": 74.8,
+  "confidence": 84.2,
   "provider": "gemini",
-  "timestamp": "2026-04-14T14:51:23.768091"
+  "architecture": "simple",
+  "retrieval_strategy": "hybrid",
+  "metadata": { "n_chunks": 3 },
+  "timestamp": "2026-04-23T12:00:00"
 }
 ```
 
@@ -236,313 +268,299 @@ Ask a question. Returns a complete answer in one response.
 
 ### `POST /api/chat/stream`
 
-Same as `/api/chat` but streams the answer word-by-word using Server-Sent Events (SSE). Accepts the same JSON body: `{ "message": "..." }`.
-
-#### Event stream
+Same as `/api/chat` but streams the answer token-by-token via Server-Sent Events.
 
 ```
 data: {"event": "start"}
-
-data: {"event": "token", "content": "Based "}
-data: {"event": "token", "content": "on "}
-data: {"event": "token", "content": "TechCorp "}
+data: {"event": "token", "content": "The "}
+data: {"event": "token", "content": "hotel "}
 ...
-
-data: {"event": "sources", "sources": [...], "confidence": 74.8}
-
+data: {"event": "sources", "sources": [...], "confidence": 84.2}
 data: {"event": "done"}
+```
+
+---
+
+### `POST /api/ingest`
+
+Add new content to the vector store at runtime.
+
+**Request**
+```json
+{
+  "type": "text",
+  "content": "TechCorp now provides a $1,000 home office stipend annually.",
+  "source": "hr/home_office_2026.md",
+  "access_level": "internal"
+}
+```
+`type` is one of `text` (plain), `html` (BeautifulSoup cleaned), or `pdf_path` (server-side file path).
+
+**Response**
+```json
+{ "status": "success", "chunks_ingested": 2, "source": "hr/home_office_2026.md" }
+```
+
+---
+
+### `POST /api/evaluate`
+
+Run baseline evaluation over the built-in golden dataset.
+
+**Request**
+```json
+{ "subset": 5, "architecture": "simple", "strategy": "top_k" }
+```
+
+**Response** — `EvalReport` dataclass serialised as JSON:
+```json
+{
+  "run_id": "eval_1776947458",
+  "n_questions": 5,
+  "avg_retrieval_relevance": 0.73,
+  "avg_faithfulness": 0.81,
+  "exact_match_rate": 0.0,
+  "avg_bleu1": 0.44,
+  "avg_latency_ms": 320.5,
+  "per_question": [...]
+}
 ```
 
 ---
 
 ### `GET /api/status`
 
-Returns the health and size of the vector store.
-
-**Response**
 ```json
 {
   "status": "operational",
-  "documents": 1,
   "chunks": 101,
-  "last_updated": "N/A",
+  "embedding_backend": "sentence_transformers",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "faiss_index_size": 0,
   "provider": "gemini"
 }
 ```
 
 ---
 
-## Telemetry
+### `GET /api/architectures` / `GET /api/strategies`
 
-The app ships with two telemetry layers.
+Lists all available architectures / retrieval strategies with descriptions.
 
-### 1. ChromaDB product telemetry (`anonymized_telemetry=True`)
+---
 
-Sends anonymous usage events (client version, Python version, OS, operation names — **never document content**) to ChromaDB's PostHog analytics. Helps the ChromaDB team prioritise development. Disable by setting `anonymized_telemetry=False` in `core/vector_engine.py`.
+### `POST /api/conversation/reset`
 
-### 2. OpenTelemetry (OTEL) tracing
+Clears the conversational RAG chat history (memory window).
 
-Every RAG operation emits a structured span. In development mode spans are printed to stdout. In production, point them at Jaeger, Grafana Tempo, or Honeycomb.
+---
 
-**Spans emitted:**
+## RAG Architectures
 
-| Span name | Key attributes |
-|---|---|
-| `vector_engine.search` | `query`, `n_results_requested`, `n_results_returned`, `top_similarity_score`, `collection_size` |
-| `vector_engine.encode` | `input_count`, `total_input_chars`, `embedding_dim`, `duration_ms` |
-| `vector_engine.add_documents` | `chunk_count`, `category`, `embedding_dim`, `collection_size_after` |
-| `vector_engine.get_stats` | `total_chunks` |
+### Simple RAG (§5.1)
+Standard pipeline: retrieve → build prompt → generate. Supports chain-of-thought mode.
 
-**Switch to a real tracing backend:**
+### Multi-Hop RAG (§5.2)
+Iterative decomposition loop. The LLM emits JSON `{"action": "search", "query": "..."}` steps until it signals `"action": "done"`. Evidence accumulates across hops (up to 4 by default).
 
-```python
-# app.py — change one argument
-init_telemetry(service_name="techcorp-rag", console=False)
+### Conversational RAG (§5.3)
+Follow-up questions are rewritten into standalone questions via `build_query_contextualise_prompt`. A sliding window of the last 6 turns is included in the augmented context.
+
+### Agentic RAG — ReAct (§5.4)
+`Thought → Action[input] → Observation` loop. Built-in tools: `search(query)`, `summarise(text)`, `finish(answer)`. Custom tools injectable via `tools={"name": callable}`.
+
+### CRAG — Corrective RAG (§5.5)
+Every retrieved chunk is graded RELEVANT / NOT_RELEVANT by the LLM. If all chunks fail grading, a web-search fallback (or multi-query expansion) is triggered before generation.
+
+### Graph RAG (§5.6)
+LLM extracts `(subject | relation | object)` triples from ingested text into a NetworkX DiGraph. At query time, entities are identified and the ego-graph (radius=2) provides structured facts alongside retrieved passages.
+
+---
+
+## Retrieval Strategies
+
+### Top-K (§4.1)
+Dense cosine similarity search. Chunks with similarity < 0.70 are rejected.
+
+### Hybrid BM25 + Vector with RRF (§4.2)
+BM25 lexical scores and dense vector scores are merged using **Reciprocal Rank Fusion** (k=60):
+
+```
+RRF_score(d) = Σ  1 / (60 + rank_i(d))
 ```
 
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317   # gRPC endpoint
+### Multi-Query (§4.3)
+The LLM generates 3 alternative phrasings of the query. Results across all queries are deduplicated by chunk ID and sorted by similarity.
+
+### HyDE (§4.4)
+A hypothetical answer is generated for the query and embedded. The hypothetical embedding — which lies in "answer space" — is used as the search vector instead of the raw query embedding.
+
+### Filtered (§4.5)
+Top-K search followed by post-filtering on:
+- `doc_type` — `pdf`, `markdown`, `html`, `code`, `text`
+- `access_level` — ACL hierarchy: `public < internal < confidential < restricted`
+- `ingested_at` — ISO 8601 date range (`after` / `before`)
+
+---
+
+## Evaluation
+
+### Golden Dataset
+Five built-in Q&A pairs covering RAG concepts, chunking, hybrid search, HyDE, and score thresholds. Extend by calling `dataset.add(GoldenExample(...))` or saving a JSON file.
+
+### Automated Metrics
+
+| Metric | Implementation |
+|---|---|
+| Retrieval Relevance | Fraction of retrieved chunks with ≥ 2 keyword overlaps with the question |
+| Faithfulness | Fraction of answer sentences grounded in retrieved context (word overlap proxy) |
+| Exact Match | Lowercased string equality |
+| BLEU-1 | Unigram precision of hypothesis vs. reference |
+| Latency (ms) | End-to-end wall-clock time per question |
+
+### Human Eval Checklist (§5.6)
+Four binary dimensions per question:
+1. **Retrieval relevance** — are the retrieved chunks relevant?
+2. **Faithfulness** — does the answer stay within retrieved context?
+3. **Completeness** — does it address all parts of the question?
+4. **No hallucination** — does it avoid inventing facts not in context?
+
+Run interactively:
+```python
+from core.evaluation import RAGEvaluator
+evaluator.human_eval(results, interactive=True)
 ```
 
 ---
 
-## High-Level Design
+## Telemetry
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       Browser                               │
-│               http://localhost:5252                         │
-└───────────────────────┬─────────────────────────────────────┘
-                        │ HTTP
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│                Flask Web Server  (app.py)                   │
-│                                                             │
-│  GET  /                  →  chat.html (UI)                  │
-│  POST /api/chat          →  full JSON answer                │
-│  POST /api/chat/stream   →  SSE word-by-word stream         │
-│  GET  /api/status        →  system health                   │
-└────────────┬──────────────────────────┬─────────────────────┘
-             │                          │
-             ▼                          ▼
-   ┌──────────────────┐      ┌─────────────────────┐
-   │   ChatEngine     │      │  DocumentProcessor  │
-   │                  │      │                     │
-   │  Orchestrates    │      │  Reads techcorp-docs │
-   │  Retrieve +      │      │  Chunks + ingests   │
-   │  Generate        │      │  on first startup   │
-   └────────┬─────────┘      └──────────┬──────────┘
-            │                           │
-            │ search()                  │ add_documents()
-            └──────────────┬────────────┘
-                           ▼
-              ┌────────────────────────┐
-              │     VectorEngine       │
-              │                        │
-              │  Embeds with           │
-              │  all-MiniLM-L6-v2     │
-              │  (384-dim vectors)     │
-              │                        │
-              │  Stores/queries        │
-              │  ChromaDB (cosine)     │
-              └──────────┬─────────────┘
-                         │
-                         ▼
-              ┌────────────────────────┐
-              │   ChromaDB on disk     │
-              │   ./chroma_db/         │
-              │   101 chunks           │
-              │   11 documents         │
-              └────────────────────────┘
-```
+### 1. ChromaDB product telemetry
+Sends anonymous operation events (client version, OS, API calls — never document content) to ChromaDB's PostHog backend. Disable: `anonymized_telemetry=False` in `core/vector_engine.py`.
 
-### RAG Data Flow
+### 2. OpenTelemetry spans
 
+| Span | Key attributes |
+|---|---|
+| `vector_engine.add_documents` | `chunk_count`, `category`, `embedding_dim`, `collection_size_after` |
+| `vector_engine.encode` | `input_count`, `total_input_chars`, `embedding_dim`, `duration_ms` |
+| `vector_engine.search` | `query`, `n_results_requested`, `n_results_returned`, `top_similarity_score`, `score_threshold` |
+| `vector_engine.get_stats` | `total_chunks` |
+
+**Switch to a production backend:**
+```python
+# app.py
+init_telemetry(service_name="techcorp-rag", console=False)
 ```
-User types a question
-         │
-         ▼
-[1] Embed question  ──►  384-dim float vector   (all-MiniLM-L6-v2, ~20 ms)
-         │
-         ▼
-[2] Cosine search   ──►  Top-3 matching chunks  (ChromaDB HNSW index)
-         │
-         ▼
-[3] Build context   ──►  Join chunks into a single string
-         │
-         ├─── GEMINI_API_KEY set?    ──YES──► Gemini 1.5 Flash generates answer
-         │
-         ├─── ANTHROPIC_API_KEY set? ──YES──► Claude Haiku generates answer
-         │
-         └─────────────────────────── NO ───► Keyword extraction from context
-         │
-         ▼
-[4] Return  { answer, sources, confidence }  ──►  Browser
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317   # Jaeger / Tempo / Honeycomb
 ```
 
 ---
 
 ## Low-Level Design
 
-### `core/telemetry.py`
-
-Initialises the global OpenTelemetry `TracerProvider` once before any component starts.
+### Section 1 — Foundations (`core/foundations.py`)
 
 ```
-init_telemetry(service_name, console)
-  │
-  ├─ console=True  →  SimpleSpanProcessor + ConsoleSpanExporter
-  │                   (each span printed immediately — good for local dev)
-  │
-  └─ console=False →  BatchSpanProcessor + OTLPSpanExporter
-                      endpoint: $OTEL_EXPORTER_OTLP_ENDPOINT (gRPC)
-                      (non-blocking batch export — use in production)
+count_tokens(text)
+  ├── tiktoken BPE cl100k_base (lazy-loaded; falls back to len/4 offline)
+  └── returns int
+
+plan_context_budget(system, history, chunks, reserved=1024, model="default")
+  ├── CONTEXT_LIMITS[model] = 32_000 / 128_000 / 200_000 / 1_048_576
+  ├── system_tokens + history_tokens + chunk_tokens ≤ limit - reserved
+  └── returns {chunks_included, chunk_indices_included, fits_all, ...}
+
+cosine_similarity(a, b)  →  dot(a,b) / (|a| × |b|)
+score_label(sim)         →  "very_high" ≥ 0.85 | "good" ≥ 0.70 | "moderate" ≥ 0.50 | "low"
+make_chunk_id(src, idx, content) → sha256[:12] content hash — idempotent re-indexing
 ```
 
----
-
-### `core/vector_engine.py`
-
-Wraps ChromaDB and the sentence-transformer model. Every public method is instrumented with an OTEL span.
+### Section 2 — Document Processor (`core/document_processor.py`)
 
 ```
-VectorEngine.__init__
-  └─ SentenceTransformer('all-MiniLM-L6-v2')   # 384-dim, 90M params
-  └─ chromadb.PersistentClient(path='./chroma_db')
-  └─ collection: techcorp_docs  (cosine distance, HNSW index)
+DocumentProcessor._chunk(text)
+  ├── "recursive"    → recursive_chunk(separators=["\n\n", "\n", ". ", " ", ""])
+  ├── "fixed_char"   → fixed_char_chunk(size=1000, overlap=100)
+  └── "fixed_token"  → fixed_token_chunk(max_tokens=256, overlap=32)
 
-add_documents(chunks, metadatas)
-  └─ span: vector_engine.add_documents
-       └─ _encode(chunks)          ← span: vector_engine.encode
-       └─ collection.add(ids, embeddings, documents, metadatas)
+parse_markdown_by_headers(text) → [{section, level, content}, ...]   # split on H1/H2/H3
+parse_html(html)                → BeautifulSoup4 noise removal + heading preservation
+parse_pdf(path)                 → pdfplumber pages with table→markdown conversion
+chunk_code(code, language)      → AST top-level defs (Python) or blank-line blocks
 
-search(query, n_results=3)
-  └─ span: vector_engine.search
-       └─ _encode([query])         ← span: vector_engine.encode
-       └─ collection.query(query_embeddings, n_results)
-       └─ returns {documents, metadatas, distances}
-
-_encode(texts)                     # internal — called by search + add_documents
-  └─ span: vector_engine.encode
-       └─ model.encode(texts)      # returns float32 numpy arrays
-       └─ .tolist()                # convert to Python lists for ChromaDB
+build_metadata(source, doc_type, chunk_index, total_chunks, ...)
+  → {source, doc_type, chunk_index, total_chunks, access_level,
+     ingested_at, page_number?, section?, file, category, token_count}
 ```
 
-**Embedding model specs:**
-
-| Property | Value |
-| --- | --- |
-| Model | `all-MiniLM-L6-v2` |
-| Output dimensions | 384 |
-| Max input tokens | 256 |
-| Approximate latency | 15–25 ms per query (CPU) |
-| Distance metric | Cosine (stored in ChromaDB HNSW) |
-
----
-
-### `core/chat_engine.py`
-
-Implements the Retrieve → Augment → Generate pipeline.
+### Section 3 — Vector Engine (`core/vector_engine.py`)
 
 ```
-ChatEngine.__init__(vector_engine)
-  └─ checks GEMINI_API_KEY env var first
-  └─ if set: initialises google.generativeai client (gemini-1.5-flash)
-  └─ else checks ANTHROPIC_API_KEY env var
-  └─ if set: initialises anthropic.Anthropic client
-  └─ else: falls back to keyword extraction
+EmbeddingBackend(backend, model_name)
+  ├── "sentence_transformers" + "minilm"  → all-MiniLM-L6-v2  (384-dim)
+  ├── "sentence_transformers" + "bge"     → BAAI/bge-large-en-v1.5  (1024-dim)
+  └── "openai" + model_name               → text-embedding-3-small/large (Matryoshka)
 
-get_response(question) → {answer, sources, confidence, provider}
-  │
-  ├─ vector_engine.search(question, n_results=3)
-  │
-  ├─ per-source confidence = (1 − cosine_distance) × 100
-  │
-  ├─ provider == "gemini"?
-  │      YES → _generate_with_gemini(question, context)
-  │               model: gemini-1.5-flash
-  │
-  ├─ provider == "anthropic"?
-  │      YES → _generate_with_anthropic(question, context)
-  │               model: claude-haiku-4-5-20251001
-  │               max_tokens: 512
-  │
-  └─ provider == "fallback"
-             → _generate_from_context(question, context)
-                  keyword pattern-match → extract relevant lines
-  │
-  └─ overall_confidence = mean of per-source confidence scores
+FaissIndex(dim, index_type)
+  ├── "flat"  → IndexFlatIP  (exact inner-product; L2-normalised → cosine)
+  └── "hnsw"  → IndexHNSWFlat(M=32)  (ANN, faster for large corpora)
+
+VectorEngine.search(query, n_results, score_threshold=0.70, where=None, use_faiss=False)
+  ├── encode query   → 384-dim vector
+  ├── ChromaDB cosine distance d  → similarity = 1 − d
+  ├── filter: similarity ≥ score_threshold
+  └── returns {documents, metadatas, distances, similarities}
 ```
 
-**Generation modes:**
-
-| Mode | Trigger | Quality |
-| --- | --- | --- |
-| Gemini 2.0 Flash | `GEMINI_API_KEY` is set (checked first) | Fluent, context-aware answers |
-| Claude Haiku | `ANTHROPIC_API_KEY` is set | Fluent, context-aware answers |
-| Keyword fallback | No API key | Extracts matching lines from retrieved chunks |
-
----
-
-### `core/document_processor.py`
-
-Reads every `.md` file from `techcorp-docs/`, splits it into overlapping chunks, and calls `vector_engine.add_documents`.
+### Section 4 — Retrieval (`core/retrieval.py`)
 
 ```
-chunk_text(text, size=500, overlap=100)
+BM25Index.build(vector_engine)
+  └── pulls all docs from ChromaDB.get() → BM25Okapi(tokenised_docs)
 
-  text:  |<──────── 500 chars ────────>|
-                         |<──────── 500 chars ────────>|
-         |<── 400 ──>|<── 100 overlap ──>|
+reciprocal_rank_fusion(ranked_lists, k=60)
+  └── score(doc) = Σ 1/(60 + rank_i)  →  merged list sorted by score
 
-  Ensures no chunk exceeds the model's 256-token limit.
-  Preserves sentence context across chunk boundaries.
-
-DocumentProcessor.process_all_documents()
-  for each category dir in techcorp-docs/:
-    for each .md file:
-      content = file.read_text()
-      chunks  = chunk_text(content)          # ~7–13 chunks per file
-      metadatas = [{file, category}] × len(chunks)
-      vector_engine.add_documents(chunks, metadatas)
+Retriever.retrieve(query, strategy, n, user_access_level)
+  ├── "top_k"       → VectorEngine.search + ACL filter
+  ├── "hybrid"      → BM25.search + top_k  → RRF fusion
+  ├── "multi_query" → LLM generates 3 variants → union by chunk_id
+  ├── "hyde"        → LLM writes hypothetical doc → embed → search
+  └── "filtered"    → top_k × 4 → doctype + date + ACL filters
 ```
 
-**Ingestion results (current knowledge base):**
-
-| Category | Files | Chunks |
-| --- | --- | --- |
-| engineering | 2 | 24 |
-| finance | 1 | 9 |
-| hr | 4 | 35 |
-| legal | 1 | 8 |
-| products | 3 | 25 |
-| **Total** | **11** | **101** |
-
----
-
-### `app.py` — Flask application
+### Section 5 — Architectures (`core/rag_architectures.py`)
 
 ```
-Startup sequence
-  1. init_telemetry()              # must run before VectorEngine
-  2. VectorEngine()                # loads model + opens ChromaDB
-  3. ChatEngine(vector_engine)     # checks for API key
-  4. DocumentProcessor(vector_engine)
-  5. if not vector_engine.is_initialized():
-         doc_processor.process_all_documents()
-  6. app.run(host='0.0.0.0', port=5252, debug=True)
+SimpleRAG.run(question, strategy)
+  └── retrieve → build_rag_prompt / build_chain_of_thought_prompt → llm_fn
 
-Routes
-  GET  /                  → render templates/chat.html
-  POST /api/chat          → chat_engine.get_response(message)
-  POST /api/chat/stream   → same, word-by-word SSE (50 ms token delay)
-  GET  /api/status        → vector_engine.get_stats()
+MultiHopRAG.run(question, max_hops=4)
+  └── for hop in range(max_hops):
+        llm_fn(plan_prompt) → {action, query}  |  {action: "done", answer}
+        if search: retrieve(sub_query) → accumulate evidence
+
+ConversationalRAG.run(question)
+  └── llm_fn(contextualise_prompt) → standalone_question
+      retrieve(standalone) → llm_fn(history + context)
+      update chat_history (sliding window of 6 turns)
+
+AgenticRAG.run(question, max_steps=8)
+  └── for step in range(max_steps):
+        llm_fn(react_prompt) → Thought / Action[input] / finish
+        tool_fn(action_input) → observation → append to trajectory
+
+CRAG.run(question)
+  └── retrieve → grade each chunk (RELEVANT / NOT_RELEVANT)
+      → answer from relevant chunks
+      → if none: web_search_fn or multi_query fallback
+
+GraphRAG.run(question)
+  └── retrieve seed chunks
+      llm_fn(triple_prompt) → (subj | rel | obj) triples → NetworkX DiGraph
+      llm_fn(entity_prompt) → entities → ego_graph(radius=2)
+      answer from graph_context + retrieval_context
 ```
-
-### `templates/chat.html` — Frontend
-
-- Pure HTML / CSS / JavaScript — no build step, no npm, no framework
-- Talks to `/api/chat` via `fetch` (JSON)
-- Suggestion chips pre-fill the input with common questions
-- Auto-resizing textarea; Enter to send, Shift+Enter for newline
-- Shows sources and confidence score beneath each assistant reply
